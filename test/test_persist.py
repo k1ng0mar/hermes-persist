@@ -127,8 +127,50 @@ class TestGiveUpDetection(unittest.TestCase):
         r = self.p.on_pre_verify(**_pre_verify_kwargs(final_response="I can't get this green."))
         self.assertIsNotNone(r)
 
-    def test_neutral_stop_does_not_trigger(self):
+    def test_not_fixable_triggers(self):
+        r = self.p.on_pre_verify(**_pre_verify_kwargs(final_response="this is not fixable."))
+        self.assertIsNotNone(r)
+
+    def test_no_correct_x_can_triggers(self):
+        r = self.p.on_pre_verify(**_pre_verify_kwargs(final_response="no correct add can satisfy both."))
+        self.assertIsNotNone(r)
+
+    def test_impossible_to_satisfy_triggers(self):
+        r = self.p.on_pre_verify(**_pre_verify_kwargs(final_response="it is impossible to satisfy both specs."))
+        self.assertIsNotNone(r)
+
+    def test_tests_are_green_is_success(self):
+        r = self.p.on_pre_verify(**_pre_verify_kwargs(final_response="All tests are green now."))
+        self.assertIsNone(r)
+
+    def test_cant_go_green_triggers(self):
+        r = self.p.on_pre_verify(**_pre_verify_kwargs(final_response="The suite can't go green."))
+        self.assertIsNotNone(r)
+
+    def test_no_real_impl_can_satisfy_triggers(self):
+        r = self.p.on_pre_verify(**_pre_verify_kwargs(final_response="No real implementation can satisfy both."))
+        self.assertIsNotNone(r)
+
+    def test_mutually_exclusive_triggers(self):
+        r = self.p.on_pre_verify(**_pre_verify_kwargs(final_response="The two tests are mutually exclusive."))
+        self.assertIsNotNone(r)
+
+    def test_not_going_to_fake_triggers(self):
+        r = self.p.on_pre_verify(**_pre_verify_kwargs(final_response="I'm not going to fake it."))
+        self.assertIsNotNone(r)
+
+    def test_neutral_stop_after_red_turn_still_nudges(self):
+        # The turn ended on a failed tool call: a neutral wrap-up is still a
+        # stop-while-broken. This is the deterministic path that does not
+        # depend on give-up phrasing.
         r = self.p.on_pre_verify(**_pre_verify_kwargs(final_response="Here's the file you asked for"))
+        self.assertIsNotNone(r)
+
+    def test_neutral_stop_after_clean_turn_does_not_nudge(self):
+        p2 = Persist(min_attempts=3)
+        p2.on_post_tool_call(**_fail("terminal", {"command": "pytest"}))
+        p2.on_post_tool_call(**_ok("read_file", {"path": "calc.py"}))
+        r = p2.on_pre_verify(**_pre_verify_kwargs(final_response="Here's the file you asked for"))
         self.assertIsNone(r)
 
     def test_policy_refusal_without_failures_does_not_trigger(self):
@@ -174,6 +216,41 @@ class TestGateConditions(unittest.TestCase):
         self.p.on_pre_llm_call(session_id="s1")
         self.p.on_post_tool_call(**_fail("terminal", {"command": "pytest"}))
         self.assertIsNotNone(self.p.on_pre_verify(**_pre_verify_kwargs(attempt=0, final_response="I can't get this green")))
+
+
+class TestEndedErrorSignal(unittest.TestCase):
+    """The turn ending on a failed tool call is a deterministic give-up signal
+    that does not depend on phrasing."""
+
+    def setUp(self):
+        self.p = Persist(min_attempts=3)
+
+    def test_ended_on_error_nudges_without_any_giveup_phrase(self):
+        self.p.on_post_tool_call(**_fail("terminal", {"command": "unittest"}))
+        # neutral wording, but the turn ended red
+        r = self.p.on_pre_verify(**_pre_verify_kwargs(
+            final_response="The remaining failure is not a code bug."))
+        self.assertIsNotNone(r)
+
+    def test_ended_clean_does_not_nudge(self):
+        self.p.on_post_tool_call(**_fail("terminal", {"command": "unittest"}))
+        # a later successful call means the turn did not end red
+        self.p.on_post_tool_call(**_ok("read_file", {"path": "calc.py"}))
+        r = self.p.on_pre_verify(**_pre_verify_kwargs(
+            final_response="Here is a summary of the file."))
+        self.assertIsNone(r)
+
+    def test_ended_error_still_respects_floor(self):
+        for i in range(3):
+            self.p.on_post_tool_call(**_fail("terminal", {"command": "unittest %d" % i}))
+        r = self.p.on_pre_verify(**_pre_verify_kwargs(
+            attempt=1, final_response="Stopping here."))
+        self.assertIsNone(r)
+
+    def test_ended_error_still_one_nudge_per_turn(self):
+        self.p.on_post_tool_call(**_fail("terminal", {"command": "unittest"}))
+        self.assertIsNotNone(self.p.on_pre_verify(**_pre_verify_kwargs(final_response="Stopping here.")))
+        self.assertIsNone(self.p.on_pre_verify(**_pre_verify_kwargs(final_response="Stopping here.")))
 
 
 class TestMinAttemptsSetting(unittest.TestCase):

@@ -42,19 +42,30 @@ DEFAULT_MIN_ATTEMPTS = 3
 MAX_FOOTER_LINES = 8
 
 # Give-up language at the END of a turn (pre_verify only fires as the agent
-# finishes). Conservative: only clear "I could not complete this" phrasing.
-# A policy refusal has no tool failures, so the failure gate below is what
-# really keeps persist out of the safety lane; this regex just spots intent.
+# finishes). Only clear "I could not complete this" phrasing. A policy refusal
+# has no tool failures, so the failure gate below is what really keeps persist
+# out of the safety lane; this regex just spots intent. Broad on purpose: the
+# failure-count and success-marker gates are the real precision controls, and a
+# missed give-up is far more costly than one redundant nudge (the nudge itself
+# explicitly permits stopping once the blocker is documented).
 _GIVEUP = re.compile(
     r"\b(?:"
     r"i'?m (?:unable|not able) to|"
-    r"i cannot|can'?t (?:complete|finish|make|get|do this|resolve)|"
-    r"unable to (?:complete|finish|resolve|make|get)|"
-    r"(?:this|it)? ?(?:isn'?t|is not) (?:possible|working|resolvable)|"
-    r"no way to (?:make|get|fix|resolve)|"
+    r"i (?:cannot|can'?t) (?:get|make|fix|resolve|complete|finish|satisfy|see a way|find a way)|"
+    r"unable to (?:complete|finish|resolve|make|get|fix|satisfy)|"
+    r"(?:is|it'?s|it is|this is|suite is) not (?:possible|fixable|resolvable|working)|"
+    r"not fixable|unfixable|"
+    r"(?:can'?t|cannot|won'?t) (?:go|be|get) (?:green|passing|pass)|"
+    r"(?:can'?t|cannot|won'?t) be (?:fixed|done|resolved|satisfied)|"
+    r"(?:can'?t|cannot) (?:satisfy|make .{0,40}(?:pass|green))|"
+    r"impossible to (?:satisfy|fix|resolve|make|get)|"
+    r"no (?:real|possible|correct|valid|honest|clean|sane|legit)\w* \w+ (?:can|could|will|would)|"
+    r"no way to (?:make|get|fix|resolve|satisfy)|"
+    r"mutually exclusive|contradict\w*|"
+    r"not (?:going to|gonna) fake|"
     r"i'?ve (?:tried|exhausted)|"
-    r"(?:could|can) ?not (?:get|make|fix|resolve|complete)|"
-    r"stuck|blocked by|gives? up|throw[s]? in"
+    r"giv(?:e|ing) up|"
+    r"stuck|blocked by|dead end"
     r")\b",
     re.IGNORECASE,
 )
@@ -146,19 +157,23 @@ class Persist:
     def _bucket(self, sid):
         b = self._turn.get(sid)
         if b is None:
-            b = {"failed": {}, "nudges": 0}
+            b = {"failed": {}, "nudges": 0, "ended_error": False}
             self._turn[sid] = b
         return b
 
     # --- observer: count distinct failed approaches this turn ---
     def on_post_tool_call(self, tool_name=None, args=None, result=None, **kwargs):
         try:
-            if not _status_error(kwargs.get("status"), result):
-                return None
             sid = _session_id(kwargs)
-            sig = _signature(tool_name, args)
+            failed = _status_error(kwargs.get("status"), result)
             with self._lock:
-                self._bucket(sid)["failed"].setdefault(sig, _label(tool_name, args))
+                bucket = self._bucket(sid)
+                # The turn's ending state: did the last tool call fail? This is a
+                # deterministic "ended red" signal, unlike give-up phrasing.
+                bucket["ended_error"] = failed
+                if failed:
+                    sig = _signature(tool_name, args)
+                    bucket["failed"].setdefault(sig, _label(tool_name, args))
         except Exception as exc:  # fail-soft: never break the tool loop
             logger.warning("persist post_tool_call error (ignored): %s", exc)
         return None
@@ -185,6 +200,7 @@ class Persist:
                 bucket = self._turn.get(sid)
                 labels = list(bucket["failed"].values()) if bucket else []
                 already = bucket["nudges"] if bucket else 0
+                ended_error = bool(bucket.get("ended_error")) if bucket else False
             n = len(labels)
             if n == 0:  # no real failures: a clean stop or a policy refusal
                 return None
@@ -192,11 +208,23 @@ class Persist:
                 return None
             if already:  # once per turn, don't lean on the caller's attempt counter
                 return None
-            if not _looks_like_giveup(final_response):
+            # Two independent signals of "trying to stop while still broken":
+            # give-up phrasing, or the turn literally ending on a failed tool call.
+            giving_up = _looks_like_giveup(final_response) or ended_error
+            if not giving_up:
+                return None
+            # An explicit success claim vetoes both signals: persist is an
+            # anti-give-up gate, not a lie detector. (A claim made over a red
+            # turn is a different bug, and not this plugin's job.)
+            if isinstance(final_response, str) and _SUCCESS.search(final_response):
                 return None
             with self._lock:
                 self._bucket(sid)["nudges"] += 1
             tried = ", ".join(labels[:MAX_FOOTER_LINES])
+            logger.info(
+                "persist nudge: session=%s distinct_failures=%d floor=%d",
+                sid, n, self.min_attempts,
+            )
             return {
                 "action": "continue",
                 "message": (
