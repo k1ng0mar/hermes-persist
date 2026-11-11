@@ -114,6 +114,19 @@ class TestGiveUpDetection(unittest.TestCase):
         r = self.p.on_pre_verify(**_pre_verify_kwargs(final_response="All tests pass, done!"))
         self.assertIsNone(r)
 
+    def test_cure_phrase_containing_green_still_triggers(self):
+        # Regression: "tests green" inside a negation is a give-up, not success.
+        r = self.p.on_pre_verify(**_pre_verify_kwargs(final_response="I cannot get these tests green."))
+        self.assertIsNotNone(r)
+
+    def test_tests_pass_after_failure_does_not_trigger(self):
+        r = self.p.on_pre_verify(**_pre_verify_kwargs(final_response="Tests pass now."))
+        self.assertIsNone(r)
+
+    def test_cannot_get_green_after_failure_triggers(self):
+        r = self.p.on_pre_verify(**_pre_verify_kwargs(final_response="I can't get this green."))
+        self.assertIsNotNone(r)
+
     def test_neutral_stop_does_not_trigger(self):
         r = self.p.on_pre_verify(**_pre_verify_kwargs(final_response="Here's the file you asked for"))
         self.assertIsNone(r)
@@ -145,6 +158,22 @@ class TestGateConditions(unittest.TestCase):
         # Second call (attempt=1) does not
         r2 = self.p.on_pre_verify(**_pre_verify_kwargs(attempt=1, final_response="I can't get this green"))
         self.assertIsNone(r2)
+
+    def test_nudges_once_even_if_caller_keeps_attempt_zero(self):
+        # Don't rely on the core's attempt counter: self-throttle on nudges.
+        r1 = self.p.on_pre_verify(**_pre_verify_kwargs(attempt=0, final_response="I can't get this green"))
+        self.assertIsNotNone(r1)
+        r2 = self.p.on_pre_verify(**_pre_verify_kwargs(attempt=0, final_response="I can't get this green"))
+        self.assertIsNone(r2)
+        r3 = self.p.on_pre_verify(**_pre_verify_kwargs(attempt=0, final_response="I can't get this green"))
+        self.assertIsNone(r3)
+
+    def test_throttle_resets_next_turn(self):
+        self.assertIsNotNone(self.p.on_pre_verify(**_pre_verify_kwargs(attempt=0, final_response="I can't get this green")))
+        # new user turn
+        self.p.on_pre_llm_call(session_id="s1")
+        self.p.on_post_tool_call(**_fail("terminal", {"command": "pytest"}))
+        self.assertIsNotNone(self.p.on_pre_verify(**_pre_verify_kwargs(attempt=0, final_response="I can't get this green")))
 
 
 class TestMinAttemptsSetting(unittest.TestCase):

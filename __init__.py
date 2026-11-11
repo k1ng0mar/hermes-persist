@@ -61,10 +61,13 @@ _GIVEUP = re.compile(
 
 # Strong success markers: if the final answer claims the work is done and
 # green, do not nudge even if a failure phrase appears earlier in it.
+# Deliberately verb-bearing: a bare "<tests> green" appears inside negations
+# like "I cannot get these tests green", which is a give-up, not a success.
 _SUCCESS = re.compile(
-    r"\b(?:all tests? (?:pass|green)|tests? (?:pass|green|succeed)|"
-    r"fully (?:working|fixed|resolved)|it'?s (?:working|fixed|green)|"
-    r"now (?:works|passing|green)|problem (?:solved|resolved)|"
+    r"\b(?:all tests? (?:pass|passed|are passing|are green)|"
+    r"tests? (?:pass|passed|are passing|are green)|"
+    r"fully (?:working|fixed|resolved)|it'?s (?:working|fixed)|"
+    r"now (?:works|passing)|problem (?:solved|resolved)|"
     r"done[.!]? *$)\b",
     re.IGNORECASE,
 )
@@ -181,10 +184,13 @@ class Persist:
             with self._lock:
                 bucket = self._turn.get(sid)
                 labels = list(bucket["failed"].values()) if bucket else []
+                already = bucket["nudges"] if bucket else 0
             n = len(labels)
             if n == 0:  # no real failures: a clean stop or a policy refusal
                 return None
             if n >= self.min_attempts:  # earned the right to give up
+                return None
+            if already:  # once per turn, don't lean on the caller's attempt counter
                 return None
             if not _looks_like_giveup(final_response):
                 return None

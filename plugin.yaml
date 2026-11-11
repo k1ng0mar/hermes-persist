@@ -14,9 +14,7 @@ provides_hooks:
   - on_session_finalize
   - on_session_reset
   - post_compaction
-provides_commands:
-  - persist
-settings:
+config_schema:
   min_attempts:
     type: integer
     default: 3
